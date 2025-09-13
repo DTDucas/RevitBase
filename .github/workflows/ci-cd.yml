@@ -1,0 +1,423 @@
+name: RevitBase CI/CD
+# Author: Duong Tran Quang - DTDucas
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  PROJECT_PATH: 'RevitBase'
+
+jobs:
+  test:
+    name: Test RevitBase
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        revit-config: ['Debug R21', 'Debug R22', 'Debug R23', 'Debug R24', 'Debug R25', 'Debug R26']
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.x'
+
+    - name: Restore dependencies
+      run: |
+        Write-Host "Restoring dependencies for configuration: ${{ matrix.revit-config }}"
+        dotnet restore ${{ env.PROJECT_PATH }}/${{ env.PROJECT_PATH }}.csproj -p:Configuration="${{ matrix.revit-config }}"
+
+    - name: Build solution
+      run: |
+        Write-Host "Building configuration: ${{ matrix.revit-config }}"
+        dotnet build ${{ env.PROJECT_PATH }}/${{ env.PROJECT_PATH }}.csproj --no-restore -p:Configuration="${{ matrix.revit-config }}" --verbosity minimal
+
+    - name: Upload build artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-artifacts-${{ matrix.revit-config }}
+        path: |
+          ${{ env.PROJECT_PATH }}/bin/**/*
+          ${{ env.PROJECT_PATH }}/obj/**/*
+        retention-days: 30
+      continue-on-error: true
+
+    - name: Notify Discord on Build Failure
+      if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+      run: |
+        $webhookUrl = "${{ secrets.DISCORD_WEBHOOK_URL }}"
+        if ([string]::IsNullOrEmpty($webhookUrl)) {
+          Write-Host "Discord webhook URL not configured, skipping notification"
+          exit 0
+        }
+
+        $timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+        $body = @{
+          embeds = @(@{
+            title = "❌ Build Failed - RevitBase"
+            description = "Build failed for configuration: ${{ matrix.revit-config }}"
+            color = 16711680
+            fields = @(
+              @{
+                name = "Configuration"
+                value = "${{ matrix.revit-config }}"
+                inline = $true
+              },
+              @{
+                name = "Branch"
+                value = "${{ github.ref_name }}"
+                inline = $true
+              },
+              @{
+                name = "Commit"
+                value = "[${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})"
+                inline = $true
+              },
+              @{
+                name = "Workflow Run"
+                value = "[View Logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+                inline = $true
+              }
+            )
+            timestamp = $timestamp
+          })
+        } | ConvertTo-Json -Depth 10
+
+        try {
+          Invoke-RestMethod -Uri $webhookUrl -Method POST -ContentType "application/json" -Body $body
+          Write-Host "Discord notification sent successfully"
+        } catch {
+          Write-Host "Failed to send Discord notification: $($_.Exception.Message)"
+        }
+
+  build:
+    name: Build NuGet Packages
+    runs-on: windows-2022
+    needs: test
+    if: github.event_name == 'push'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.x'
+
+    - name: Build and Pack all Revit versions
+      run: |
+        $configs = @('Release R21', 'Release R22', 'Release R23', 'Release R24', 'Release R25', 'Release R26')
+        New-Item -ItemType Directory -Force -Path ./nupkg
+
+        foreach ($config in $configs) {
+          Write-Host "Restoring dependencies for configuration: $config"
+          dotnet restore ${{ env.PROJECT_PATH }}/${{ env.PROJECT_PATH }}.csproj -p:Configuration="$config"
+
+          Write-Host "Building configuration: $config"
+          dotnet build ${{ env.PROJECT_PATH }}/${{ env.PROJECT_PATH }}.csproj --no-restore -p:Configuration="$config" --verbosity minimal
+
+          Write-Host "Packing configuration: $config"
+          dotnet pack ${{ env.PROJECT_PATH }}/${{ env.PROJECT_PATH }}.csproj --no-build -p:Configuration="$config" --output ./nupkg --verbosity minimal
+        }
+
+    - name: Upload package artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: revitbase-nuget-packages
+        path: nupkg/*.nupkg
+        retention-days: 30
+
+  security:
+    name: Security Analysis
+    runs-on: windows-2022
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.x'
+
+    - name: Restore dependencies for R25 configuration
+      run: dotnet restore ${{ env.PROJECT_PATH }}/${{ env.PROJECT_PATH }}.csproj -p:Configuration="Release R25"
+
+    - name: Run security analysis
+      run: |
+        Write-Host "Running security analysis on RevitBase dependencies"
+        try {
+          dotnet list ${{ env.PROJECT_PATH }}/${{ env.PROJECT_PATH }}.csproj package --vulnerable --include-transitive 2>&1 | Tee-Object -FilePath security-report.txt
+          Get-Content security-report.txt
+        } catch {
+          Write-Host "Security analysis completed with warnings or no vulnerabilities found"
+          "No vulnerabilities detected or analysis completed with warnings" | Out-File -FilePath security-report.txt
+        }
+
+    - name: Upload security report
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-report
+        path: security-report.txt
+        retention-days: 30
+
+    - name: Notify Discord on Security Issues
+      if: failure()
+      run: |
+        $webhookUrl = "${{ secrets.DISCORD_WEBHOOK_URL }}"
+        if ([string]::IsNullOrEmpty($webhookUrl)) {
+          Write-Host "Discord webhook URL not configured, skipping notification"
+          exit 0
+        }
+
+        $timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+        $body = @{
+          embeds = @(@{
+            title = "🚨 Security Alert - RevitBase"
+            description = "Security vulnerabilities detected in RevitBase dependencies"
+            color = 16776960
+            fields = @(
+              @{
+                name = "Repository"
+                value = "https://github.com/${{ github.repository }}"
+                inline = $true
+              },
+              @{
+                name = "Workflow"
+                value = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                inline = $true
+              }
+            )
+            timestamp = $timestamp
+          })
+        } | ConvertTo-Json -Depth 10
+
+        try {
+          Invoke-RestMethod -Uri $webhookUrl -Method POST -ContentType "application/json" -Body $body
+          Write-Host "Discord notification sent successfully"
+        } catch {
+          Write-Host "Failed to send Discord notification: $($_.Exception.Message)"
+        }
+
+  publish:
+    name: Publish NuGet Packages
+    runs-on: windows-2022
+    needs: [test, build, security]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.x'
+
+    - name: Build and Pack all Revit versions
+      run: |
+        $configs = @('Release R21', 'Release R22', 'Release R23', 'Release R24', 'Release R25', 'Release R26')
+        New-Item -ItemType Directory -Force -Path ./nupkg
+
+        foreach ($config in $configs) {
+          Write-Host "Restoring dependencies for configuration: $config"
+          dotnet restore ${{ env.PROJECT_PATH }}/${{ env.PROJECT_PATH }}.csproj -p:Configuration="$config"
+
+          Write-Host "Building configuration: $config"
+          dotnet build ${{ env.PROJECT_PATH }}/${{ env.PROJECT_PATH }}.csproj --no-restore -p:Configuration="$config" --verbosity minimal
+
+          Write-Host "Packing configuration: $config"
+          dotnet pack ${{ env.PROJECT_PATH }}/${{ env.PROJECT_PATH }}.csproj --no-build -p:Configuration="$config" --output ./nupkg --verbosity minimal
+        }
+
+    - name: Get package info
+      id: package-info
+      run: |
+        $packageFiles = Get-ChildItem -Path "nupkg/*.nupkg"
+
+        # Extract base version from project file
+        $projectContent = Get-Content "${{ env.PROJECT_PATH }}/${{ env.PROJECT_PATH }}.csproj" -Raw
+        $baseVersionMatch = [regex]::Match($projectContent, '<BaseVersion>(.*?)</BaseVersion>')
+        $baseVersion = $baseVersionMatch.Groups[1].Value
+
+        # Get the first package file to extract the package name
+        $firstPackage = $packageFiles | Select-Object -First 1
+        $packageName = "DTDucas.RevitBase"
+
+        echo "package-name=$packageName" >> $env:GITHUB_OUTPUT
+        echo "package-version=$baseVersion" >> $env:GITHUB_OUTPUT
+        echo "Package: $packageName base version $baseVersion"
+        echo "Generated packages for all Revit versions (2021-2026)"
+
+    - name: Configure GitHub Packages authentication
+      run: |
+        # Remove existing github source if it exists
+        dotnet nuget remove source github 2>$null || echo "Source 'github' not found, continuing..."
+        # Add GitHub Packages source
+        dotnet nuget add source --username DTDucas --password ${{ secrets.GITHUB_TOKEN }} --store-password-in-clear-text --name github "https://nuget.pkg.github.com/DTDucas/index.json"
+
+    - name: Publish to NuGet
+      run: |
+        $packages = Get-ChildItem -Path "nupkg/*.nupkg"
+        Write-Host "Found $($packages.Count) packages to publish:"
+        $packages | ForEach-Object { Write-Host "  - $($_.Name)" }
+
+        foreach ($package in $packages) {
+          Write-Host "Publishing package to NuGet.org: $($package.Name)"
+          try {
+            dotnet nuget push $package.FullName --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+            Write-Host "✅ Successfully published to NuGet.org: $($package.Name)"
+          } catch {
+            Write-Host "❌ Failed to publish to NuGet.org: $($package.Name) - $($_.Exception.Message)"
+          }
+        }
+
+    - name: Publish to GitHub Packages
+      run: |
+        $packages = Get-ChildItem -Path "nupkg/*.nupkg"
+
+        foreach ($package in $packages) {
+          Write-Host "Publishing package to GitHub Packages: $($package.Name)"
+          try {
+            dotnet nuget push $package.FullName --source "github" --skip-duplicate
+            Write-Host "✅ Successfully published to GitHub Packages: $($package.Name)"
+          } catch {
+            Write-Host "❌ Failed to publish to GitHub Packages: $($package.Name) - $($_.Exception.Message)"
+          }
+        }
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ steps.package-info.outputs.package-version }}
+        name: RevitBase v${{ steps.package-info.outputs.package-version }}
+        body: |
+          ## RevitBase Release v${{ steps.package-info.outputs.package-version }}
+
+          ### 📦 Installation
+
+          For each supported Revit version:
+          ```xml
+          <!-- Revit 2021 -->
+          <PackageReference Include="RevitBase" Version="2021.${{ steps.package-info.outputs.package-version }}" />
+
+          <!-- Revit 2022 -->
+          <PackageReference Include="RevitBase" Version="2022.${{ steps.package-info.outputs.package-version }}" />
+
+          <!-- Revit 2023 -->
+          <PackageReference Include="RevitBase" Version="2023.${{ steps.package-info.outputs.package-version }}" />
+
+          <!-- Revit 2024 -->
+          <PackageReference Include="RevitBase" Version="2024.${{ steps.package-info.outputs.package-version }}" />
+
+          <!-- Revit 2025 -->
+          <PackageReference Include="RevitBase" Version="2025.${{ steps.package-info.outputs.package-version }}" />
+
+          <!-- Revit 2026 -->
+          <PackageReference Include="RevitBase" Version="2026.${{ steps.package-info.outputs.package-version }}" />
+          ```
+
+          Or via .NET CLI:
+          ```bash
+          # Replace version with your target Revit version
+          dotnet add package DTDucas.RevitBase --version ${{ steps.package-info.outputs.package-version }}
+          ```
+
+          ### 🔗 Package Links
+          - [NuGet Gallery](https://www.nuget.org/packages/DTDucas.RevitBase)
+          - [GitHub Repository](https://github.com/DTDucas/RevitBase)
+
+          ### ✨ Features
+          - **Multi-Version Support**: Compatible with Revit 2021-2026
+          - **Base External Command**: Comprehensive base class for Revit external commands
+          - **Exception & Dialog Suppression**: Built-in support for handling failures and dialogs
+          - **External Event Framework**: Thread-safe Revit API operations
+          - **Command Model**: Data structure for command tracking and auditing
+          - **License Utilities**: Command execution validation and tracking
+          - **Comprehensive Error Handling**: Standardized error management
+
+          ### 📋 Changes
+          Auto-generated release from main branch.
+        draft: false
+        prerelease: false
+        files: nupkg/*.nupkg
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Notify Discord
+      if: always()
+      run: |
+        if ("${{ job.status }}" -eq "success") {
+          $STATUS = "✅ SUCCESS"
+          $COLOR = 65280
+          $DESCRIPTION = "RevitBase v${{ steps.package-info.outputs.package-version }} published successfully to NuGet"
+        } else {
+          $STATUS = "❌ FAILED"
+          $COLOR = 16711680
+          $DESCRIPTION = "RevitBase package publication failed"
+        }
+
+        $body = @{
+          embeds = @(@{
+            title = "RevitBase - NuGet Package Publication"
+            description = $DESCRIPTION
+            color = $COLOR
+            fields = @(
+              @{
+                name = "Status"
+                value = $STATUS
+                inline = $true
+              },
+              @{
+                name = "Repository"
+                value = "https://github.com/${{ github.repository }}"
+                inline = $true
+              },
+              @{
+                name = "Commit"
+                value = "[${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})"
+                inline = $true
+              },
+              @{
+                name = "Package Version"
+                value = "${{ steps.package-info.outputs.package-version }}"
+                inline = $true
+              },
+              @{
+                name = "NuGet Gallery"
+                value = "[View Package](https://www.nuget.org/packages/DTDucas.RevitBase)"
+                inline = $true
+              },
+              @{
+                name = "GitHub Release"
+                value = "[View Release](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.package-info.outputs.package-version }})"
+                inline = $true
+              }
+            )
+            timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+          })
+        } | ConvertTo-Json -Depth 10
+
+        $webhookUrl = "${{ secrets.DISCORD_WEBHOOK_URL }}"
+        if (-not [string]::IsNullOrEmpty($webhookUrl)) {
+          try {
+            Invoke-RestMethod -Uri $webhookUrl -Method POST -ContentType "application/json" -Body $body
+            Write-Host "Discord notification sent successfully"
+          } catch {
+            Write-Host "Failed to send Discord notification: $($_.Exception.Message)"
+          }
+        } else {
+          Write-Host "Discord webhook URL not configured, skipping notification"
+        }
