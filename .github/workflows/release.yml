@@ -94,10 +94,16 @@ jobs:
         $packages = Get-ChildItem -Path "nupkg/*.nupkg"
         foreach ($package in $packages) {
           Write-Host "Publishing package: $($package.Name)"
-          if ("${{ github.event.inputs.prerelease }}" -eq "true") {
-            dotnet nuget push $package.FullName --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
-          } else {
-            dotnet nuget push $package.FullName --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+          try {
+            $result = dotnet nuget push $package.FullName --api-key "${{ secrets.NUGET_API_KEY }}" --source "https://api.nuget.org/v3/index.json" --skip-duplicate 2>&1
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✅ Successfully published: $($package.Name)"
+            } else {
+              Write-Host "❌ Failed to publish: $($package.Name) - Exit code: $LASTEXITCODE"
+              Write-Host "Output: $result"
+            }
+          } catch {
+            Write-Host "❌ Failed to publish: $($package.Name) - $($_.Exception.Message)"
           }
         }
 

@@ -278,8 +278,13 @@ jobs:
         foreach ($package in $packages) {
           Write-Host "Publishing package to NuGet.org: $($package.Name)"
           try {
-            dotnet nuget push $package.FullName --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
-            Write-Host "✅ Successfully published to NuGet.org: $($package.Name)"
+            $result = dotnet nuget push $package.FullName --api-key "${{ secrets.NUGET_API_KEY }}" --source "https://api.nuget.org/v3/index.json" --skip-duplicate 2>&1
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✅ Successfully published to NuGet.org: $($package.Name)"
+            } else {
+              Write-Host "❌ Failed to publish to NuGet.org: $($package.Name) - Exit code: $LASTEXITCODE"
+              Write-Host "Output: $result"
+            }
           } catch {
             Write-Host "❌ Failed to publish to NuGet.org: $($package.Name) - $($_.Exception.Message)"
           }
@@ -292,8 +297,13 @@ jobs:
         foreach ($package in $packages) {
           Write-Host "Publishing package to GitHub Packages: $($package.Name)"
           try {
-            dotnet nuget push $package.FullName --source "github" --skip-duplicate
-            Write-Host "✅ Successfully published to GitHub Packages: $($package.Name)"
+            $result = dotnet nuget push $package.FullName --source "github" --skip-duplicate 2>&1
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✅ Successfully published to GitHub Packages: $($package.Name)"
+            } else {
+              Write-Host "❌ Failed to publish to GitHub Packages: $($package.Name) - Exit code: $LASTEXITCODE"
+              Write-Host "Output: $result"
+            }
           } catch {
             Write-Host "❌ Failed to publish to GitHub Packages: $($package.Name) - $($_.Exception.Message)"
           }
